@@ -902,3 +902,59 @@ func TestDetectFinalizerAndCleanupLeaks(t *testing.T) {
 		t.Fatalf("expected %d symbolized locations, got:\n%s", wantSymbolizedLocations, got)
 	}
 }
+
+func TestExternalAllocFree(t *testing.T) {
+	// Alloc and free should balance out.
+	runtime.ExternalAlloc(100)
+	runtime.ExternalAlloc(200)
+	runtime.ExternalFree(150)
+	runtime.ExternalFree(150)
+	// No way to read the total directly, but this shouldn't panic
+	// or leave the GC in a bad state. Run a GC to verify.
+	runtime.GC()
+}
+
+func TestExternalAllocTriggersGC(t *testing.T) {
+	if os.Getenv("GOGC") == "off" {
+		t.Skip("skipping test; GOGC=off in environment")
+	}
+
+	// Use a low GOGC so the test is sensitive.
+	defer debug.SetGCPercent(debug.SetGCPercent(100))
+
+	// Force a GC and read stats to get a baseline.
+	runtime.GC()
+	runtime.GC() // Second GC to stabilize heapMarked.
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	baseGCs := stats.NumGC
+
+	// Add a large amount of external memory. This should trigger
+	// at least one GC cycle because the external memory inflates
+	// the effective heapLive past the trigger point.
+	var extSize uint64 = 100 << 20 // 100MB of "external" memory
+	runtime.ExternalAlloc(extSize)
+
+	// Give the concurrent GC time to complete. The trigger check
+	// in ExternalAlloc starts GC, but it runs concurrently.
+	// Small allocations will also check the trigger and participate
+	// in GC assists.
+	for i := 0; i < 1000; i++ {
+		runtime.Gosched()
+		_ = make([]byte, 1024)
+	}
+
+	// Wait for any in-progress GC to finish.
+	runtime.GC()
+	runtime.ReadMemStats(&stats)
+	afterGCs := stats.NumGC
+
+	// Clean up external memory.
+	runtime.ExternalFree(extSize)
+
+	// We expect at least 2 GCs: the one triggered by external memory
+	// pressure, plus our explicit runtime.GC() above.
+	if afterGCs <= baseGCs+1 {
+		t.Fatalf("expected GC to trigger from external memory pressure, but NumGC did not increase enough: base=%d after=%d", baseGCs, afterGCs)
+	}
+}
