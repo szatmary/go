@@ -506,6 +506,11 @@ func (c *gcControllerState) revise() {
 		gcPercent = 100000
 	}
 	live := c.heapLive.Load()
+	// Include externally allocated memory in the live total so that
+	// assist pacing accounts for the full memory pressure.
+	if ext := c.externalMemory.Load(); ext > 0 {
+		live += uint64(ext)
+	}
 	scan := c.heapScan.Load()
 	work := c.heapScanWork.Load() + c.stackScanWork.Load() + c.globalsScanWork.Load()
 
@@ -1124,6 +1129,19 @@ func (c *gcControllerState) memoryLimitHeapGoal() uint64 {
 	// greater impact.
 
 	memoryLimit := uint64(c.memoryLimit.Load())
+
+	// Reduce the effective memory limit by externally allocated memory
+	// (e.g. via cgo). External memory consumes the process's memory
+	// budget but isn't tracked in mappedReady. We subtract it from
+	// the limit rather than adding it to nonHeapMemory because it is
+	// user-allocated memory, not Go runtime overhead.
+	if ext := c.externalMemory.Load(); ext > 0 {
+		extUint := uint64(ext)
+		if extUint >= memoryLimit {
+			return c.heapMarked
+		}
+		memoryLimit -= extUint
+	}
 
 	// Compute term 1.
 	nonHeapMemory := mappedReady - heapFree - heapAlloc

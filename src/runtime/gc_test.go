@@ -914,6 +914,32 @@ func TestExternalAllocFree(t *testing.T) {
 	runtime.GC()
 }
 
+func TestExternalMemoryInMemStats(t *testing.T) {
+	// Start clean.
+	runtime.GC()
+
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	var extSize uint64 = 42 << 20 // 42MB
+	runtime.ExternalAlloc(extSize)
+
+	var during runtime.MemStats
+	runtime.ReadMemStats(&during)
+
+	runtime.ExternalFree(extSize)
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	if during.ExternalMemory != extSize {
+		t.Errorf("ExternalMemory during = %d, want %d", during.ExternalMemory, extSize)
+	}
+	if after.ExternalMemory != before.ExternalMemory {
+		t.Errorf("ExternalMemory after free = %d, want %d", after.ExternalMemory, before.ExternalMemory)
+	}
+}
+
 func TestExternalAllocTriggersGC(t *testing.T) {
 	if os.Getenv("GOGC") == "off" {
 		t.Skip("skipping test; GOGC=off in environment")

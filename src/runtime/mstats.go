@@ -244,6 +244,17 @@ type MemStats struct {
 	// runtime allocations.
 	OtherSys uint64
 
+	// External memory statistics.
+
+	// ExternalMemory is bytes of memory allocated outside of Go
+	// (for example, via cgo or a syscall) that have been reported
+	// to the runtime via [ExternalAlloc] and [ExternalFree].
+	//
+	// The garbage collector uses this value to apply memory
+	// pressure proportional to the external allocation. This
+	// field is zero if ExternalAlloc has not been called.
+	ExternalMemory uint64
+
 	// Garbage collector statistics.
 
 	// NextGC is the target heap size of the next GC cycle.
@@ -546,6 +557,7 @@ func readmemstats_m(stats *MemStats) {
 	// at a more granular level in the runtime.
 	stats.GCSys = memstats.gcMiscSys.load() + gcWorkBufInUse
 	stats.OtherSys = memstats.other_sys.load()
+	stats.ExternalMemory = uint64(max(gcController.externalMemory.Load(), 0))
 	stats.NextGC = heapGoal
 	stats.LastGC = memstats.last_gc_unix
 	stats.PauseTotalNs = memstats.pause_total_ns
