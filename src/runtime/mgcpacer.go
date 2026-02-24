@@ -1319,8 +1319,12 @@ func (c *gcControllerState) commit(isSweepDone bool) {
 	// plus additional runway for non-heap sources of GC work.
 	gcPercentHeapGoal := ^uint64(0)
 	if gcPercent := c.gcPercent.Load(); gcPercent >= 0 {
+		// Treat external memory as part of the heap baseline for
+		// consistency with the trigger check and assist ratio, which
+		// both add external memory to heapLive.
 		externalMem := uint64(max(c.externalMemory.Load(), 0))
-		gcPercentHeapGoal = c.heapMarked + (c.heapMarked+c.lastStackScan.Load()+c.globalsScan.Load()+externalMem)*uint64(gcPercent)/100
+		heapBase := c.heapMarked + externalMem
+		gcPercentHeapGoal = heapBase + (heapBase+c.lastStackScan.Load()+c.globalsScan.Load())*uint64(gcPercent)/100
 	}
 	// Apply the minimum heap size here. It's defined in terms of gcPercent
 	// and is only updated by functions that call commit.
