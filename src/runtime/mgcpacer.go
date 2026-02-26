@@ -103,6 +103,15 @@ type gcControllerState struct {
 	// should never be negative.
 	memoryLimit atomic.Int64
 
+	// externalMemory is the amount of memory allocated externally
+	// (e.g. via cgo) that the GC should account for when determining
+	// memory pressure. Updated via runtime.ExternalAlloc and
+	// runtime.ExternalFree.
+	//
+	// This value may be negative if the caller over-frees, but
+	// only non-negative values are used in GC calculations.
+	externalMemory atomic.Int64
+
 	// heapMinimum is the minimum heap size at which to trigger GC.
 	// For small heaps, this overrides the usual GOGC*live set rule.
 	//
@@ -497,6 +506,11 @@ func (c *gcControllerState) revise() {
 		gcPercent = 100000
 	}
 	live := c.heapLive.Load()
+	// Include externally allocated memory in the live total so that
+	// assist pacing accounts for the full memory pressure.
+	if ext := c.externalMemory.Load(); ext > 0 {
+		live += uint64(ext)
+	}
 	scan := c.heapScan.Load()
 	work := c.heapScanWork.Load() + c.stackScanWork.Load() + c.globalsScanWork.Load()
 
@@ -1116,6 +1130,19 @@ func (c *gcControllerState) memoryLimitHeapGoal() uint64 {
 
 	memoryLimit := uint64(c.memoryLimit.Load())
 
+	// Reduce the effective memory limit by externally allocated memory
+	// (e.g. via cgo). External memory consumes the process's memory
+	// budget but isn't tracked in mappedReady. We subtract it from
+	// the limit rather than adding it to nonHeapMemory because it is
+	// user-allocated memory, not Go runtime overhead.
+	if ext := c.externalMemory.Load(); ext > 0 {
+		extUint := uint64(ext)
+		if extUint >= memoryLimit {
+			return c.heapMarked
+		}
+		memoryLimit -= extUint
+	}
+
 	// Compute term 1.
 	nonHeapMemory := mappedReady - heapFree - heapAlloc
 
@@ -1292,7 +1319,12 @@ func (c *gcControllerState) commit(isSweepDone bool) {
 	// plus additional runway for non-heap sources of GC work.
 	gcPercentHeapGoal := ^uint64(0)
 	if gcPercent := c.gcPercent.Load(); gcPercent >= 0 {
-		gcPercentHeapGoal = c.heapMarked + (c.heapMarked+c.lastStackScan.Load()+c.globalsScan.Load())*uint64(gcPercent)/100
+		// Treat external memory as part of the heap baseline for
+		// consistency with the trigger check and assist ratio, which
+		// both add external memory to heapLive.
+		externalMem := uint64(max(c.externalMemory.Load(), 0))
+		heapBase := c.heapMarked + externalMem
+		gcPercentHeapGoal = heapBase + (heapBase+c.lastStackScan.Load()+c.globalsScan.Load())*uint64(gcPercent)/100
 	}
 	// Apply the minimum heap size here. It's defined in terms of gcPercent
 	// and is only updated by functions that call commit.
@@ -1409,6 +1441,38 @@ func setMemoryLimit(in int64) (out int64) {
 		unlock(&mheap_.lock)
 	})
 	return out
+}
+
+// ExternalAlloc informs the garbage collector that bytes of memory
+// have been allocated outside of Go (for example, via cgo or a syscall).
+// This causes the garbage collector to apply memory pressure proportional
+// to the external allocation, triggering collection sooner.
+//
+// ExternalAlloc is particularly useful in combination with [SetFinalizer]
+// and [ExternalFree] to ensure timely cleanup of externally allocated resources.
+//
+// Example usage:
+//
+//	// C library allocated 10MB
+//	runtime.ExternalAlloc(10 << 20)
+//	runtime.SetFinalizer(obj, func(o *T) {
+//		C.free(o.ptr)
+//		runtime.ExternalFree(10 << 20)
+//	})
+func ExternalAlloc(bytes uint64) {
+	gcController.externalMemory.Add(int64(bytes))
+	if t := (gcTrigger{kind: gcTriggerHeap}); t.test() {
+		gcStart(t)
+	}
+}
+
+// ExternalFree informs the garbage collector that bytes of externally
+// allocated memory have been freed. This reduces the memory pressure
+// previously reported by [ExternalAlloc].
+//
+// It is safe to call ExternalFree from a finalizer.
+func ExternalFree(bytes uint64) {
+	gcController.externalMemory.Add(-int64(bytes))
 }
 
 func readGOMEMLIMIT() int64 {

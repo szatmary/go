@@ -710,7 +710,11 @@ func (t gcTrigger) test() bool {
 	switch t.kind {
 	case gcTriggerHeap:
 		trigger, _ := gcController.trigger()
-		return gcController.heapLive.Load() >= trigger
+		live := gcController.heapLive.Load()
+		if ext := gcController.externalMemory.Load(); ext > 0 {
+			live += uint64(ext)
+		}
+		return live >= trigger
 	case gcTriggerTime:
 		if gcController.gcPercent.Load() < 0 {
 			return false
